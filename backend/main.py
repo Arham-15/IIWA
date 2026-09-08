@@ -104,6 +104,8 @@ class ManualRequest(BaseModel):
 
 
 class CalculationResult(BaseModel):
+    total_classes: int
+    attended_classes: int
     current_percentage: float
     target_percentage: float
     max_bunks: int
@@ -139,6 +141,8 @@ def calculate_result(total: int, attended: int, remaining: Optional[int]) -> Cal
                 f"{TARGET_PERCENTAGE:.0f}% attendance."
             )
             return CalculationResult(
+                total_classes=total,
+                attended_classes=attended,
                 current_percentage=current_percentage,
                 target_percentage=TARGET_PERCENTAGE,
                 max_bunks=max_bunks,
@@ -153,6 +157,8 @@ def calculate_result(total: int, attended: int, remaining: Optional[int]) -> Cal
                 f"minimize the shortfall."
             )
             return CalculationResult(
+                total_classes=total,
+                attended_classes=attended,
                 current_percentage=current_percentage,
                 target_percentage=TARGET_PERCENTAGE,
                 max_bunks=0,
@@ -169,6 +175,8 @@ def calculate_result(total: int, attended: int, remaining: Optional[int]) -> Cal
             f"still be at {TARGET_PERCENTAGE:.0f}%."
         )
         return CalculationResult(
+            total_classes=total,
+            attended_classes=attended,
             current_percentage=current_percentage,
             target_percentage=TARGET_PERCENTAGE,
             max_bunks=max_bunks_raw,
@@ -186,6 +194,8 @@ def calculate_result(total: int, attended: int, remaining: Optional[int]) -> Cal
             f"in a row (with no more misses) to get back to target."
         )
         return CalculationResult(
+            total_classes=total,
+            attended_classes=attended,
             current_percentage=current_percentage,
             target_percentage=TARGET_PERCENTAGE,
             max_bunks=0,
@@ -390,16 +400,14 @@ async def calculate_ai(request: Request, file: UploadFile = File(...)):
     )
 
     system_instruction = (
-        "You are an expert OCR attendance parser specialized in reading college portals, ERP tables, "
-        "LMS, Moodle, and mobile attendance dashboards (including blurry, low-contrast, or cropped screenshots). "
-        "\nYour task: Extract the total number of classes held and classes attended across all subjects.\n"
-        "Guidelines:\n"
-        "1. Look for tables or summaries with columns like: 'Total / Held / Conducted / Delivered / Max', 'Attended / Present / Att', 'Absent / Missed', or 'Percentage / %'.\n"
-        "2. If multiple subject/course rows are present, SUM the total classes held across all subjects, and SUM the attended classes across all subjects.\n"
-        "3. If attendance is written as fractions (e.g. '18/24' or '42 / 50'), the first number is attended and the second is total.\n"
-        "4. If an overall summary or 'Grand Total' row is shown at the bottom, you can use those aggregate numbers directly.\n"
-        "5. If numbers are slightly blurry, use context and neighboring rows to determine the exact digits accurately.\n"
-        "6. Return ONLY valid JSON in this exact shape with no markdown or explanation:\n"
+        "You are an expert OCR attendance parser. Analyze this attendance portal screenshot carefully.\n"
+        "Your goal: Extract 'total_classes' (total classes held/conducted) and 'attended_classes' (classes attended/present).\n\n"
+        "CRITICAL RULES TO AVOID WRONG MATH:\n"
+        "1. DO NOT sum serial numbers (1, 2, 3), course codes (e.g. CS101), credit hours (e.g. 3, 4), or percentages (e.g. 80%).\n"
+        "2. If an 'Overall Total' or 'Grand Total' or 'Total' summary row exists at the bottom or top of the table, ALWAYS USE THOSE OVERALL NUMBERS directly.\n"
+        "3. If multiple subjects/courses are listed without a grand total row, sum the 'Conducted/Held/Total' column for total_classes, and sum the 'Attended/Present' column for attended_classes.\n"
+        "4. If numbers are shown in fraction format like '30/35', the numerator (30) is attended and denominator (35) is total.\n"
+        "5. Return ONLY a single JSON object in this exact shape with no markdown or explanation:\n"
         '{"total_classes": <int>, "attended_classes": <int>}'
     )
 

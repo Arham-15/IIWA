@@ -217,6 +217,31 @@ export default function ResultsScreen({ result, lastMode, onReset, onNavigate })
         </div>
       </div>
 
+      {/* Extracted Source Data Banner */}
+      {(result.total_classes !== undefined && result.attended_classes !== undefined) && (
+        <div className="w-full rounded-2xl bg-indigo-50/70 dark:bg-indigo-950/40 p-3.5 border border-indigo-200 dark:border-indigo-800/60 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="material-symbols-outlined text-indigo-600 dark:text-indigo-400 text-[20px] shrink-0">fact_check</span>
+            <div className="min-w-0">
+              <span className="text-[10.5px] uppercase font-bold text-indigo-600 dark:text-indigo-400 block tracking-wider">
+                {lastMode === 'ai' ? 'AI OCR Extracted Counts' : 'Entered Counts'}
+              </span>
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate block">
+                {result.attended_classes} Attended / {result.total_classes} Total Classes Held
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={() => onNavigate('manual')}
+            className="px-2.5 py-1 rounded-lg bg-white dark:bg-slate-800 text-indigo-600 dark:text-indigo-400 font-bold text-xs border border-indigo-200 dark:border-slate-700 shadow-sm hover:scale-105 active:scale-95 transition-all shrink-0"
+            type="button"
+            title="Adjust numbers in manual entry"
+          >
+            Adjust
+          </button>
+        </div>
+      )}
+
       {/* Breakdown Stats 4-Grid Card */}
       <div className="w-full rounded-2xl bg-white dark:bg-slate-800/90 p-4 shadow-sm space-y-3 border border-slate-200 dark:border-slate-700">
         <div className="flex items-center justify-between">
