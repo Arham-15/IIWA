@@ -1,4 +1,4 @@
-﻿/**
+/**
  * AttendanceSafe API Client
  * 
  * Communicates with the FastAPI backend without exposing any backend secrets.
@@ -50,7 +50,7 @@ async function handleResponse(response) {
         friendlyMessage = 'Could not validate the input data or image format.';
         break;
       case 429:
-        friendlyMessage = 'A lot of students are using this right now. Please try again in about 30 seconds, or use manual entry instead.';
+        friendlyMessage = 'AI rate limit briefly reached. Please wait 15-20 seconds before retrying, or use manual entry.';
         break;
       case 500:
         friendlyMessage = 'Server configuration error. Please ensure the backend is properly set up.';

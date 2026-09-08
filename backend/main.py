@@ -50,7 +50,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 TARGET_PERCENTAGE = float(os.environ.get("TARGET_PERCENTAGE", 75))
 
-AI_RATE_LIMIT = os.environ.get("AI_RATE_LIMIT", "10/minute")
+AI_RATE_LIMIT = os.environ.get("AI_RATE_LIMIT", "30/minute")
 MAX_CONCURRENT_AI_CALLS = int(os.environ.get("MAX_CONCURRENT_AI_CALLS", "10"))
 
 groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
@@ -67,7 +67,14 @@ def get_groq_client() -> Optional[Groq]:
 if not GROQ_API_KEY:
     print("WARNING: GROQ_API_KEY is not set. /calculate-ai will not work until it is.")
 
-limiter = Limiter(key_func=get_remote_address)
+def get_real_ip(request: Request) -> str:
+    """Extract real client IP behind reverse proxies (Render, Cloudflare, Nginx)"""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return get_remote_address(request) or "127.0.0.1"
+
+limiter = Limiter(key_func=get_real_ip)
 
 app = FastAPI(title="AttendanceSafe API")
 app.state.limiter = limiter
@@ -205,7 +212,7 @@ def process_image_for_vision(image_bytes: bytes, filename: str = "", content_typ
         if img.mode != "RGB":
             img = img.convert("RGB")
         
-        max_dim = 1800
+        max_dim = 1200
         if max(img.width, img.height) > max_dim:
             img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
             
@@ -283,8 +290,8 @@ async def calculate_ai(request: Request, file: UploadFile = File(...)):
         raise HTTPException(
             status_code=429,
             detail=(
-                "A lot of students are using this right now. Please try again "
-                "in about 30 seconds, or use manual entry instead."
+                "Groq free AI quota (requests or tokens per minute) was briefly reached. "
+                "Please wait 15-20 seconds before retrying, or use manual entry."
             ),
         )
     except APIStatusError as e:
