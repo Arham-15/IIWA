@@ -46,6 +46,7 @@ except ImportError:
 env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path, override=True)
 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_VISION_MODEL = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 TARGET_PERCENTAGE = float(os.environ.get("TARGET_PERCENTAGE", 75))
@@ -64,8 +65,11 @@ def get_groq_client() -> Optional[Groq]:
             groq_client = Groq(api_key=key)
     return groq_client
 
-if not GROQ_API_KEY:
-    print("WARNING: GROQ_API_KEY is not set. /calculate-ai will not work until it is.")
+def get_gemini_key() -> Optional[str]:
+    return os.environ.get("GEMINI_API_KEY")
+
+if not GROQ_API_KEY and not GEMINI_API_KEY:
+    print("WARNING: Neither GROQ_API_KEY nor GEMINI_API_KEY is set. /calculate-ai will not work until one is configured.")
 
 def get_real_ip(request: Request) -> str:
     """Extract real client IP behind reverse proxies (Render, Cloudflare, Nginx)"""
@@ -197,7 +201,6 @@ def process_image_for_vision(image_bytes: bytes, filename: str = "", content_typ
     - Upscales small/low-res images with Lanczos so small font digits become legible
     - Applies UnsharpMask deblurring to restore sharp character edges
     - Normalizes lighting and contrast with autocontrast to make faint/dim text pop
-    - Sharpens blurred text characters with adaptive deblurring
     - Resizes to optimal 1200px max dimension for high token efficiency & fast response
     """
     if content_type and not (
@@ -224,35 +227,33 @@ def process_image_for_vision(image_bytes: bytes, filename: str = "", content_typ
         w, h = img.size
         
         # 3. Adaptive resolution scaling:
-        # If image is small/low-res (e.g. compressed WhatsApp screenshot), upscale so table digits are clear
         if min(w, h) < 750:
             scale = min(2.2, 950.0 / max(min(w, h), 1))
             new_w, new_h = int(w * scale), int(h * scale)
             img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
         elif max(w, h) > 1200:
-            # Downscale oversized mobile screenshots to avoid Groq rate limits
             img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
             
-        # 4. Auto-contrast stretching to fix washed out or dark portal backgrounds
+        # 4. Auto-contrast stretching
         try:
             img = ImageOps.autocontrast(img, cutoff=2)
         except Exception:
             pass
             
-        # 5. Multi-scale UnsharpMask filter to deblur and restore character strokes
+        # 5. Multi-scale UnsharpMask filter to deblur character strokes
         try:
             img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=220, threshold=2))
         except Exception:
             pass
 
-        # 6. Sharpness boost for crisp numbers
+        # 6. Sharpness boost
         try:
             sharpness = ImageEnhance.Sharpness(img)
             img = sharpness.enhance(1.8)
         except Exception:
             pass
 
-        # 7. Contrast boost to make small numbers and table borders distinct
+        # 7. Contrast boost
         try:
             contrast = ImageEnhance.Contrast(img)
             img = contrast.enhance(1.3)
@@ -267,9 +268,92 @@ def process_image_for_vision(image_bytes: bytes, filename: str = "", content_typ
     except HTTPException:
         raise
     except Exception:
-        # Fallback to direct raw base64 if PIL cannot parse (e.g., test mocks)
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
         return f"data:image/jpeg;base64,{b64_image}"
+
+
+def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
+    """
+    Ultra-flexible parser supporting:
+    1. Single JSON objects {"total_classes": 60, "attended_classes": 50}
+    2. Arrays of subjects [{"subject": "Math", "total": 30, "attended": 25}, ...]
+    3. Robust key-value regex patterns across various ERP terminology
+    4. Fraction summation (e.g. 15/20, 20/25, or overall 75/90)
+    """
+    if not raw_text:
+        return 0, 0
+
+    cleaned = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
+    cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+
+    # 1. JSON Parsing
+    json_match = re.search(r"(\[[\s\S]*?\]|\{[\s\S]*?\})", cleaned)
+    if json_match:
+        try:
+            parsed = json.loads(json_match.group(0))
+            
+            # Array of multiple subjects
+            if isinstance(parsed, list):
+                tot_sum = 0
+                att_sum = 0
+                for item in parsed:
+                    if isinstance(item, dict):
+                        for k, v in item.items():
+                            k_low = k.lower()
+                            try:
+                                val = int(v)
+                            except (ValueError, TypeError):
+                                continue
+                            if any(x in k_low for x in ["total", "held", "conducted", "delivered", "max", "classes_held"]):
+                                tot_sum += val
+                            elif any(x in k_low for x in ["attend", "present", "cleared", "attended_classes", "classes_attended"]):
+                                att_sum += val
+                if tot_sum > 0:
+                    return tot_sum, att_sum
+
+            # Single dictionary
+            elif isinstance(parsed, dict):
+                total = None
+                attended = None
+                for k, v in parsed.items():
+                    k_low = k.lower()
+                    try:
+                        val = int(v)
+                    except (ValueError, TypeError):
+                        continue
+                    if any(x in k_low for x in ["total", "held", "conducted", "delivered", "max", "classes_held"]):
+                        total = val
+                    elif any(x in k_low for x in ["attend", "present", "cleared", "attended_classes", "classes_attended"]):
+                        attended = val
+                if total is not None and attended is not None and total > 0:
+                    return total, attended
+        except Exception:
+            pass
+
+    # 2. Key-Value Regex Matching
+    tot_pattern = r"(?:total|held|conducted|delivered|max|classes_held|total_classes)(?:[^\d\n\r]{1,25})(\d+)"
+    att_pattern = r"(?:attend(?:ed)?|present|cleared|classes_attended|attended_classes)(?:[^\d\n\r]{1,25})(\d+)"
+    
+    tot_matches = [int(x) for x in re.findall(tot_pattern, cleaned, re.IGNORECASE)]
+    att_matches = [int(x) for x in re.findall(att_pattern, cleaned, re.IGNORECASE)]
+    
+    if tot_matches and att_matches:
+        return tot_matches[-1], att_matches[-1]
+
+    # 3. Fraction Matching (e.g., 25/30 or multiple rows 10/12, 15/18)
+    fractions = re.findall(r"(\d+)\s*[/]\s*(\d+)", cleaned)
+    if fractions:
+        att_total = 0
+        tot_total = 0
+        for n_str, d_str in fractions:
+            n, d = int(n_str), int(d_str)
+            if 0 < d <= 500 and n <= d:
+                att_total += n
+                tot_total += d
+        if tot_total > 0:
+            return tot_total, att_total
+
+    return 0, 0
 
 
 # ---------- Endpoints ----------
@@ -282,8 +366,10 @@ def calculate_manual(payload: ManualRequest):
 @app.post("/calculate-ai", response_model=CalculationResult)
 @limiter.limit(AI_RATE_LIMIT)
 async def calculate_ai(request: Request, file: UploadFile = File(...)):
-    active_client = get_groq_client()
-    if not active_client:
+    active_groq = get_groq_client()
+    gemini_key = get_gemini_key()
+
+    if not active_groq and not gemini_key:
         raise HTTPException(
             status_code=500,
             detail="Server is missing GROQ_API_KEY — AI mode is not configured.",
@@ -317,55 +403,54 @@ async def calculate_ai(request: Request, file: UploadFile = File(...)):
         '{"total_classes": <int>, "attended_classes": <int>}'
     )
 
-    models_to_try = [GROQ_VISION_MODEL]
-    if "qwen/qwen3.8-27b" not in models_to_try:
-        models_to_try.append("qwen/qwen3.8-27b")
-
-    completion = None
+    raw_text = ""
     last_error = None
 
-    for model_name in models_to_try:
-        for attempt in range(3):
-            try:
-                async with ai_call_semaphore:
-                    completion = await asyncio.to_thread(
-                        active_client.chat.completions.create,
-                        model=model_name,
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": system_instruction},
-                                    {"type": "image_url", "image_url": {"url": data_url}},
-                                ],
-                            }
-                        ],
-                        max_tokens=600,
-                        temperature=0,
-                    )
-                if completion and completion.choices:
-                    break
-            except RateLimitError as rle:
-                last_error = rle
-                # Exponential backoff auto-retry (1.5s, 3s)
-                if attempt < 2:
-                    await asyncio.sleep(1.5 * (attempt + 1))
-                else:
-                    break
-            except Exception as e:
-                last_error = e
-                break
-        if completion and completion.choices:
-            break
+    # Try Groq models with exponential backoff
+    if active_groq:
+        models_to_try = [GROQ_VISION_MODEL]
+        if "qwen/qwen3.8-27b" not in models_to_try:
+            models_to_try.append("qwen/qwen3.8-27b")
 
-    if not completion or not completion.choices:
+        for model_name in models_to_try:
+            for attempt in range(3):
+                try:
+                    async with ai_call_semaphore:
+                        completion = await asyncio.to_thread(
+                            active_groq.chat.completions.create,
+                            model=model_name,
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "text", "text": system_instruction},
+                                        {"type": "image_url", "image_url": {"url": data_url}},
+                                    ],
+                                }
+                            ],
+                            max_tokens=600,
+                            temperature=0,
+                        )
+                    if completion and completion.choices:
+                        raw_text = str(completion.choices[0].message.content or "").strip()
+                        break
+                except RateLimitError as rle:
+                    last_error = rle
+                    if attempt < 2:
+                        await asyncio.sleep(1.5 * (attempt + 1))
+                    else:
+                        break
+                except Exception as e:
+                    last_error = e
+                    break
+            if raw_text:
+                break
+
+    if not raw_text and last_error:
         if isinstance(last_error, RateLimitError):
             raise HTTPException(
                 status_code=429,
-                detail=(
-                    "AI quota limit briefly reached. "
-                    "Please wait a few moments before retrying, or enter your numbers manually."
-                ),
+                detail="AI quota limit briefly reached. Please wait a few moments before retrying, or enter your numbers manually.",
             )
         elif isinstance(last_error, APIStatusError):
             raise HTTPException(
@@ -378,27 +463,7 @@ async def calculate_ai(request: Request, file: UploadFile = File(...)):
                 detail=f"Couldn't reach the AI model right now ({last_error}). Try again shortly.",
             )
 
-    raw_text = str(completion.choices[0].message.content or "").strip()
-    cleaned = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
-    cleaned = cleaned.replace("```json", "").replace("```", "").strip()
-
-    json_match = re.search(r"\{[\s\S]*?\}", cleaned)
-    json_str = json_match.group(0) if json_match else cleaned
-
-    total_classes = 0
-    attended_classes = 0
-
-    try:
-        parsed = json.loads(json_str)
-        total_classes = int(parsed.get("total_classes", parsed.get("total", 0)))
-        attended_classes = int(parsed.get("attended_classes", parsed.get("attended", 0)))
-    except Exception:
-        # Robust regex fallback if JSON has non-standard formatting
-        total_m = re.search(r'"?total(?:_classes)?"?\s*:\s*(\d+)', raw_text, re.IGNORECASE)
-        att_m = re.search(r'"?attended(?:_classes)?"?\s*:\s*(\d+)', raw_text, re.IGNORECASE)
-        if total_m and att_m:
-            total_classes = int(total_m.group(1))
-            attended_classes = int(att_m.group(1))
+    total_classes, attended_classes = extract_attendance_numbers(raw_text)
 
     if total_classes <= 0:
         raise HTTPException(
