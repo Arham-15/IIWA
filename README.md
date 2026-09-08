@@ -1,4 +1,4 @@
-﻿# AttendanceSafe 🛡️
+﻿# BUNK SMART 🛡️
 
 A full-stack web application designed for students to calculate how many classes they can safely skip (or must attend consecutively) while maintaining their university attendance threshold (default 75%).
 
