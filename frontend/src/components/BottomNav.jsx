@@ -30,7 +30,7 @@ export default function BottomNav({ currentScreen, onNavigate }) {
 
         {/* LinkedIn Button */}
         <a
-          href="https://www.linkedin.com/in/arham-15"
+          href="https://www.linkedin.com/in/arham-hassan-13579a401"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-blue-500/10 hover:bg-blue-500/20 text-blue-600 dark:text-blue-400 dark:bg-blue-950/60 dark:hover:bg-blue-900/60 border border-blue-200 dark:border-blue-900/50 transition-all font-semibold text-[11px] shadow-sm hover:scale-105 active:scale-95"
