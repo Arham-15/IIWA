@@ -340,6 +340,7 @@ async def calculate_ai(request: Request, file: UploadFile = File(...)):
                                 ],
                             }
                         ],
+                        max_tokens=600,
                         temperature=0,
                     )
                 if completion and completion.choices:
@@ -384,13 +385,22 @@ async def calculate_ai(request: Request, file: UploadFile = File(...)):
     json_match = re.search(r"\{[\s\S]*?\}", cleaned)
     json_str = json_match.group(0) if json_match else cleaned
 
+    total_classes = 0
+    attended_classes = 0
+
     try:
         parsed = json.loads(json_str)
         total_classes = int(parsed.get("total_classes", parsed.get("total", 0)))
         attended_classes = int(parsed.get("attended_classes", parsed.get("attended", 0)))
-        if total_classes <= 0:
-            raise ValueError("Total classes must be > 0")
     except Exception:
+        # Robust regex fallback if JSON has non-standard formatting
+        total_m = re.search(r'"?total(?:_classes)?"?\s*:\s*(\d+)', raw_text, re.IGNORECASE)
+        att_m = re.search(r'"?attended(?:_classes)?"?\s*:\s*(\d+)', raw_text, re.IGNORECASE)
+        if total_m and att_m:
+            total_classes = int(total_m.group(1))
+            attended_classes = int(att_m.group(1))
+
+    if total_classes <= 0:
         raise HTTPException(
             status_code=422,
             detail=(
