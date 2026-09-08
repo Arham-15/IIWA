@@ -284,11 +284,10 @@ def process_image_for_vision(image_bytes: bytes, filename: str = "", content_typ
 
 def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
     """
-    Ultra-flexible parser supporting:
-    1. Single JSON objects {"total_classes": 60, "attended_classes": 50}
-    2. Arrays of subjects [{"subject": "Math", "total": 30, "attended": 25}, ...]
-    3. Robust key-value regex patterns across various ERP terminology
-    4. Fraction summation (e.g. 15/20, 20/25, or overall 75/90)
+    Deterministic attendance number extractor:
+    1. Parses JSON objects or arrays of subjects.
+    2. Performs pure Python mathematical summation across subject rows to guarantee 100% precision.
+    3. Prevents regex collisions and double-counting.
     """
     if not raw_text:
         return 0, 0
@@ -296,47 +295,42 @@ def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
     cleaned = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
     cleaned = cleaned.replace("```json", "").replace("```", "").strip()
 
-    # 1. JSON Parsing
-    json_match = re.search(r"(\[[\s\S]*?\]|\{[\s\S]*?\})", cleaned)
+    # 1. Greedy JSON Parsing (outermost brackets)
+    json_match = re.search(r"(\[[\s\S]*\]|\{[\s\S]*\})", cleaned)
     if json_match:
         try:
             parsed = json.loads(json_match.group(0))
             
-            # Array of multiple subjects
-            if isinstance(parsed, list):
-                tot_sum = 0
-                att_sum = 0
-                for item in parsed:
-                    if isinstance(item, dict):
-                        for k, v in item.items():
-                            k_low = k.lower()
-                            try:
-                                val = int(v)
-                            except (ValueError, TypeError):
-                                continue
-                            if any(x in k_low for x in ["total", "held", "conducted", "delivered", "max", "classes_held"]):
-                                tot_sum += val
-                            elif any(x in k_low for x in ["attend", "present", "cleared", "attended_classes", "classes_attended"]):
-                                att_sum += val
+            # Case A: Dictionary containing a "subjects" list or top-level totals
+            if isinstance(parsed, dict):
+                # If "subjects" list is present, perform deterministic Python summation
+                if "subjects" in parsed and isinstance(parsed["subjects"], list) and len(parsed["subjects"]) > 0:
+                    tot_sum = sum(int(s.get("conducted", s.get("total", s.get("held", s.get("total_classes", 0))))) for s in parsed["subjects"] if isinstance(s, dict))
+                    att_sum = sum(int(s.get("attended", s.get("present", s.get("attended_classes", 0)))) for s in parsed["subjects"] if isinstance(s, dict))
+                    if tot_sum > 0:
+                        return tot_sum, att_sum
+
+                # Check for explicit overall / grand total keys
+                otot = None
+                oatt = None
+                for k in ["overall_total", "grand_total", "total_classes", "overall_conducted", "total", "held", "conducted"]:
+                    if k in parsed and isinstance(parsed[k], (int, float)) and parsed[k] > 0:
+                        otot = int(parsed[k])
+                        break
+                for k in ["overall_attended", "grand_attended", "attended_classes", "overall_present", "attended", "present"]:
+                    if k in parsed and isinstance(parsed[k], (int, float)):
+                        oatt = int(parsed[k])
+                        break
+
+                if otot is not None and oatt is not None and otot > 0:
+                    return otot, oatt
+
+            # Case B: Direct Array of subjects [{"subject": "Math", "conducted": 30, "attended": 25}, ...]
+            elif isinstance(parsed, list):
+                tot_sum = sum(int(s.get("conducted", s.get("total", s.get("held", s.get("total_classes", 0))))) for s in parsed if isinstance(s, dict))
+                att_sum = sum(int(s.get("attended", s.get("present", s.get("attended_classes", 0)))) for s in parsed if isinstance(s, dict))
                 if tot_sum > 0:
                     return tot_sum, att_sum
-
-            # Single dictionary
-            elif isinstance(parsed, dict):
-                total = None
-                attended = None
-                for k, v in parsed.items():
-                    k_low = k.lower()
-                    try:
-                        val = int(v)
-                    except (ValueError, TypeError):
-                        continue
-                    if any(x in k_low for x in ["total", "held", "conducted", "delivered", "max", "classes_held"]):
-                        total = val
-                    elif any(x in k_low for x in ["attend", "present", "cleared", "attended_classes", "classes_attended"]):
-                        attended = val
-                if total is not None and attended is not None and total > 0:
-                    return total, attended
         except Exception:
             pass
 
@@ -350,7 +344,7 @@ def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
     if tot_matches and att_matches:
         return tot_matches[-1], att_matches[-1]
 
-    # 3. Fraction Matching (e.g., 25/30 or multiple rows 10/12, 15/18)
+    # 3. Fraction Matching
     fractions = re.findall(r"(\d+)\s*[/]\s*(\d+)", cleaned)
     if fractions:
         att_total = 0
@@ -400,15 +394,11 @@ async def calculate_ai(request: Request, file: UploadFile = File(...)):
     )
 
     system_instruction = (
-        "You are an expert OCR attendance parser. Analyze this attendance portal screenshot carefully.\n"
-        "Your goal: Extract 'total_classes' (total classes held/conducted) and 'attended_classes' (classes attended/present).\n\n"
-        "CRITICAL RULES TO AVOID WRONG MATH:\n"
-        "1. DO NOT sum serial numbers (1, 2, 3), course codes (e.g. CS101), credit hours (e.g. 3, 4), or percentages (e.g. 80%).\n"
-        "2. If an 'Overall Total' or 'Grand Total' or 'Total' summary row exists at the bottom or top of the table, ALWAYS USE THOSE OVERALL NUMBERS directly.\n"
-        "3. If multiple subjects/courses are listed without a grand total row, sum the 'Conducted/Held/Total' column for total_classes, and sum the 'Attended/Present' column for attended_classes.\n"
-        "4. If numbers are shown in fraction format like '30/35', the numerator (30) is attended and denominator (35) is total.\n"
-        "5. Return ONLY a single JSON object in this exact shape with no markdown or explanation:\n"
-        '{"total_classes": <int>, "attended_classes": <int>}'
+        "You are an expert OCR attendance parser. Analyze this attendance portal screenshot.\n"
+        "Extract either:\n"
+        "1. Overall summary numbers if present: {\"overall_total\": <int>, \"overall_attended\": <int>}\n"
+        "2. OR list each course row: {\"subjects\": [{\"subject\": str, \"conducted\": <int>, \"attended\": <int>}, ...]}\n"
+        "Rules: Ignore serial numbers, credit hours, course codes, and percentages. Return ONLY valid JSON."
     )
 
     raw_text = ""
