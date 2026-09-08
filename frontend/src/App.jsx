@@ -111,7 +111,7 @@ export default function App() {
   return (
     <div className={`min-h-screen ${isDark ? 'dark bg-slate-950 text-slate-100' : 'bg-slate-100 text-slate-900'} transition-colors duration-200 flex justify-center antialiased`}>
       {/* Centered Mobile/Tablet App Shell Container */}
-      <div className="w-full max-w-lg min-h-screen bg-white dark:bg-slate-900 border-x border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col relative pb-20 transition-colors duration-200">
+      <div className="w-full max-w-lg min-h-screen bg-white dark:bg-slate-900 border-x border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col relative pb-24 transition-colors duration-200">
         
         {/* Fixed Top Header */}
         <Header
@@ -122,7 +122,7 @@ export default function App() {
         />
 
         {/* Main Screen Content Area */}
-        <main className="flex-1 flex flex-col w-full px-4 pt-20 pb-8 relative">
+        <main className="flex-1 flex flex-col w-full px-4 pt-20 pb-10 relative">
           {currentScreen === 'home' && (
             <HomeScreen onNavigate={handleNavigate} />
           )}
