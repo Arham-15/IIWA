@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: attendancesafe
+    env: docker
+    plan: free
+    dockerfilePath: Dockerfile
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_VISION_MODEL
+        value: qwen/qwen3.6-27b
+      - key: TARGET_PERCENTAGE
+        value: "75"
+      - key: AI_RATE_LIMIT
+        value: 6/minute
+      - key: MAX_CONCURRENT_AI_CALLS
+        value: "10"
