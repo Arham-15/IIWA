@@ -11,20 +11,30 @@ export default function AIUploadScreen({ onAnalyze, onNavigate, isLoading }) {
     setFileError(null);
     if (!file) return;
 
-    const validTypes = ['image/jpeg', 'image/png', 'image/jpg', 'image/webp'];
-    if (!validTypes.includes(file.type)) {
-      setFileError('Please upload a valid image file (JPEG, PNG, or WEBP).');
+    const isImageType =
+      !file.type ||
+      file.type.startsWith('image/') ||
+      file.type === 'application/octet-stream' ||
+      /\.(jpe?g|png|webp|heic|heif|bmp|gif|jfif)$/i.test(file.name);
+
+    if (!isImageType) {
+      setFileError('Please upload a valid image screenshot (PNG, JPEG, WebP, or HEIC).');
       return;
     }
 
-    if (file.size > 20 * 1024 * 1024) {
-      setFileError('Image is too large (maximum 20MB allowed).');
+    if (file.size > 25 * 1024 * 1024) {
+      setFileError('Image is too large (maximum 25MB allowed).');
       return;
     }
 
     setSelectedFile(file);
-    const objectUrl = URL.createObjectURL(file);
-    setPreviewUrl(objectUrl);
+    try {
+      const objectUrl = URL.createObjectURL(file);
+      setPreviewUrl(objectUrl);
+    } catch (e) {
+      // Fallback if URL.createObjectURL is unsupported
+      setPreviewUrl(null);
+    }
   };
 
   const handleDrag = (e) => {
@@ -118,7 +128,7 @@ export default function AIUploadScreen({ onAnalyze, onNavigate, isLoading }) {
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/png,image/jpeg,image/webp"
+            accept="image/*"
             onChange={handleChange}
             className="hidden"
           />
