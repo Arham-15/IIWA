@@ -286,8 +286,8 @@ def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
     """
     Deterministic attendance number extractor:
     1. Parses JSON objects or arrays of subjects.
-    2. Performs pure Python mathematical summation across subject rows to guarantee 100% precision.
-    3. Prevents regex collisions and double-counting.
+    2. Excludes non-regular weightage rows (e.g. library attendance, remedial).
+    3. Performs pure Python mathematical summation across valid academic course rows.
     """
     if not raw_text:
         return 0, 0
@@ -295,18 +295,25 @@ def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
     cleaned = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
     cleaned = cleaned.replace("```json", "").replace("```", "").strip()
 
-    # 1. Greedy JSON Parsing (outermost brackets)
+    # 1. Greedy JSON Parsing
     json_match = re.search(r"(\[[\s\S]*\]|\{[\s\S]*\})", cleaned)
     if json_match:
         try:
             parsed = json.loads(json_match.group(0))
             
+            def is_excluded_row(s_dict):
+                name = str(s_dict.get("subject", s_dict.get("name", s_dict.get("course", "")))).lower()
+                excluded_keywords = ["library", "weightage", "remedial", "non-academic", "lib -", "lib-"]
+                return any(k in name for k in excluded_keywords)
+
             # Case A: Dictionary containing a "subjects" list or top-level totals
             if isinstance(parsed, dict):
-                # If "subjects" list is present, perform deterministic Python summation
                 if "subjects" in parsed and isinstance(parsed["subjects"], list) and len(parsed["subjects"]) > 0:
-                    tot_sum = sum(int(s.get("conducted", s.get("total", s.get("held", s.get("total_classes", 0))))) for s in parsed["subjects"] if isinstance(s, dict))
-                    att_sum = sum(int(s.get("attended", s.get("present", s.get("attended_classes", 0)))) for s in parsed["subjects"] if isinstance(s, dict))
+                    valid_subjects = [s for s in parsed["subjects"] if isinstance(s, dict) and not is_excluded_row(s)]
+                    if not valid_subjects:
+                        valid_subjects = [s for s in parsed["subjects"] if isinstance(s, dict)]
+                    tot_sum = sum(int(s.get("conducted", s.get("total", s.get("held", s.get("total_classes", 0))))) for s in valid_subjects)
+                    att_sum = sum(int(s.get("attended", s.get("present", s.get("attended_classes", 0)))) for s in valid_subjects)
                     if tot_sum > 0:
                         return tot_sum, att_sum
 
@@ -325,10 +332,13 @@ def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
                 if otot is not None and oatt is not None and otot > 0:
                     return otot, oatt
 
-            # Case B: Direct Array of subjects [{"subject": "Math", "conducted": 30, "attended": 25}, ...]
+            # Case B: Direct Array of subjects
             elif isinstance(parsed, list):
-                tot_sum = sum(int(s.get("conducted", s.get("total", s.get("held", s.get("total_classes", 0))))) for s in parsed if isinstance(s, dict))
-                att_sum = sum(int(s.get("attended", s.get("present", s.get("attended_classes", 0)))) for s in parsed if isinstance(s, dict))
+                valid_subjects = [s for s in parsed if isinstance(s, dict) and not is_excluded_row(s)]
+                if not valid_subjects:
+                    valid_subjects = [s for s in parsed if isinstance(s, dict)]
+                tot_sum = sum(int(s.get("conducted", s.get("total", s.get("held", s.get("total_classes", 0))))) for s in valid_subjects)
+                att_sum = sum(int(s.get("attended", s.get("present", s.get("attended_classes", 0)))) for s in valid_subjects)
                 if tot_sum > 0:
                     return tot_sum, att_sum
         except Exception:
@@ -395,10 +405,9 @@ async def calculate_ai(request: Request, file: UploadFile = File(...)):
 
     system_instruction = (
         "You are an expert OCR attendance parser. Analyze this attendance portal screenshot.\n"
-        "Extract either:\n"
-        "1. Overall summary numbers if present: {\"overall_total\": <int>, \"overall_attended\": <int>}\n"
-        "2. OR list each course row: {\"subjects\": [{\"subject\": str, \"conducted\": <int>, \"attended\": <int>}, ...]}\n"
-        "Rules: Ignore serial numbers, credit hours, course codes, and percentages. Return ONLY valid JSON."
+        "Extract academic course rows as JSON:\n"
+        "{\"subjects\": [{\"subject\": str, \"conducted\": <int>, \"attended\": <int>}, ...]}\n"
+        "CRITICAL: Exclude non-academic rows like 'Library Attendance', 'Weightage', or 'Remedial'."
     )
 
     raw_text = ""
