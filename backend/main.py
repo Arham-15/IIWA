@@ -194,8 +194,9 @@ def process_image_for_vision(image_bytes: bytes, filename: str = "", content_typ
     """
     Intelligently enhances low-quality, blurry, or low-contrast screenshots:
     - Auto-corrects EXIF rotation (critical for phone photos/screenshots)
-    - Upscales small/low-res images so small font digits become legible
-    - Normalizes lighting and contrast with autocontrast to make dim text pop
+    - Upscales small/low-res images with Lanczos so small font digits become legible
+    - Applies UnsharpMask deblurring to restore sharp character edges
+    - Normalizes lighting and contrast with autocontrast to make faint/dim text pop
     - Sharpens blurred text characters with adaptive deblurring
     - Resizes to optimal 1200px max dimension for high token efficiency & fast response
     """
@@ -224,31 +225,37 @@ def process_image_for_vision(image_bytes: bytes, filename: str = "", content_typ
         
         # 3. Adaptive resolution scaling:
         # If image is small/low-res (e.g. compressed WhatsApp screenshot), upscale so table digits are clear
-        if min(w, h) < 700:
-            scale = min(2.0, 900.0 / max(min(w, h), 1))
+        if min(w, h) < 750:
+            scale = min(2.2, 950.0 / max(min(w, h), 1))
             new_w, new_h = int(w * scale), int(h * scale)
             img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        elif max(w, h) > 1300:
+        elif max(w, h) > 1200:
             # Downscale oversized mobile screenshots to avoid Groq rate limits
-            img.thumbnail((1300, 1300), Image.Resampling.LANCZOS)
+            img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
             
         # 4. Auto-contrast stretching to fix washed out or dark portal backgrounds
         try:
-            img = ImageOps.autocontrast(img, cutoff=1)
+            img = ImageOps.autocontrast(img, cutoff=2)
         except Exception:
             pass
             
-        # 5. Deblurring & text sharpness enhancement
+        # 5. Multi-scale UnsharpMask filter to deblur and restore character strokes
         try:
-            sharpness = ImageEnhance.Sharpness(img)
-            img = sharpness.enhance(1.6)
+            img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=220, threshold=2))
         except Exception:
             pass
 
-        # 6. Contrast boost to make small numbers and table borders distinct
+        # 6. Sharpness boost for crisp numbers
+        try:
+            sharpness = ImageEnhance.Sharpness(img)
+            img = sharpness.enhance(1.8)
+        except Exception:
+            pass
+
+        # 7. Contrast boost to make small numbers and table borders distinct
         try:
             contrast = ImageEnhance.Contrast(img)
-            img = contrast.enhance(1.2)
+            img = contrast.enhance(1.3)
         except Exception:
             pass
             
@@ -310,43 +317,67 @@ async def calculate_ai(request: Request, file: UploadFile = File(...)):
         '{"total_classes": <int>, "attended_classes": <int>}'
     )
 
-    try:
-        async with ai_call_semaphore:
-            completion = await asyncio.to_thread(
-                active_client.chat.completions.create,
-                model=GROQ_VISION_MODEL,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": system_instruction},
-                            {"type": "image_url", "image_url": {"url": data_url}},
-                        ],
-                    }
-                ],
-                temperature=0,
-            )
-        raw_text = str(completion.choices[0].message.content or "").strip()
-    except RateLimitError:
-        raise HTTPException(
-            status_code=429,
-            detail=(
-                "Groq free AI quota (requests or tokens per minute) was briefly reached. "
-                "Please wait 15-20 seconds before retrying, or use manual entry."
-            ),
-        )
-    except APIStatusError as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"The AI service returned an error. Try again shortly. ({e.status_code})",
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Couldn't reach the AI model right now. Try again shortly. ({e})",
-        )
+    models_to_try = [GROQ_VISION_MODEL]
+    if "qwen/qwen3.8-27b" not in models_to_try:
+        models_to_try.append("qwen/qwen3.8-27b")
 
-    # Defensive parsing: strip reasoning tokens (<think>...</think>) and code fences
+    completion = None
+    last_error = None
+
+    for model_name in models_to_try:
+        for attempt in range(3):
+            try:
+                async with ai_call_semaphore:
+                    completion = await asyncio.to_thread(
+                        active_client.chat.completions.create,
+                        model=model_name,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": system_instruction},
+                                    {"type": "image_url", "image_url": {"url": data_url}},
+                                ],
+                            }
+                        ],
+                        temperature=0,
+                    )
+                if completion and completion.choices:
+                    break
+            except RateLimitError as rle:
+                last_error = rle
+                # Exponential backoff auto-retry (1.5s, 3s)
+                if attempt < 2:
+                    await asyncio.sleep(1.5 * (attempt + 1))
+                else:
+                    break
+            except Exception as e:
+                last_error = e
+                break
+        if completion and completion.choices:
+            break
+
+    if not completion or not completion.choices:
+        if isinstance(last_error, RateLimitError):
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "AI quota limit briefly reached. "
+                    "Please wait a few moments before retrying, or enter your numbers manually."
+                ),
+            )
+        elif isinstance(last_error, APIStatusError):
+            raise HTTPException(
+                status_code=502,
+                detail=f"The AI service returned an error ({last_error.status_code}). Try again shortly.",
+            )
+        else:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Couldn't reach the AI model right now ({last_error}). Try again shortly.",
+            )
+
+    raw_text = str(completion.choices[0].message.content or "").strip()
     cleaned = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL).strip()
     cleaned = cleaned.replace("```json", "").replace("```", "").strip()
 

@@ -5,6 +5,7 @@ export default function AIUploadScreen({ onAnalyze, onNavigate, isLoading }) {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [dragActive, setDragActive] = useState(false);
   const [fileError, setFileError] = useState(null);
+  const [isEnhanced, setIsEnhanced] = useState(true);
   const fileInputRef = useRef(null);
 
   const validateAndSetFile = (file) => {
@@ -154,7 +155,7 @@ export default function AIUploadScreen({ onAnalyze, onNavigate, isLoading }) {
       ) : (
         /* Ready File Preview Card */
         <div className="rounded-2xl bg-white dark:bg-slate-800/90 p-4 shadow-sm flex flex-col gap-3 border border-slate-200 dark:border-slate-700">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">
               <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
               <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 truncate">
@@ -164,18 +165,40 @@ export default function AIUploadScreen({ onAnalyze, onNavigate, isLoading }) {
                 {(selectedFile.size / 1024 / 1024).toFixed(2)} MB
               </span>
             </div>
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 text-[11px] font-bold shrink-0">
-              <span className="material-symbols-outlined text-[13px]">check_circle</span>
-              Ready
-            </span>
+            
+            <button
+              type="button"
+              onClick={() => setIsEnhanced(!isEnhanced)}
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold transition-all shadow-sm shrink-0 ${
+                isEnhanced
+                  ? 'bg-indigo-600 text-white hover:bg-indigo-500'
+                  : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-300'
+              }`}
+              title="Toggle AI image enhancement"
+            >
+              <span className="material-symbols-outlined text-[13px]">
+                {isEnhanced ? 'auto_fix_high' : 'image'}
+              </span>
+              <span>{isEnhanced ? 'Auto-Enhanced' : 'Original'}</span>
+            </button>
           </div>
 
-          <div className="relative rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-900 max-h-56 flex items-center justify-center border border-slate-200 dark:border-slate-800">
+          <div className="relative rounded-xl overflow-hidden bg-slate-950 max-h-60 flex items-center justify-center border border-slate-200 dark:border-slate-800 group">
             <img
               src={previewUrl}
               alt="Screenshot Preview"
-              className="max-h-56 w-full object-contain p-2"
+              className={`max-h-60 w-full object-contain p-2 transition-all duration-300 ${
+                isEnhanced
+                  ? 'contrast-125 brightness-105 saturate-110'
+                  : ''
+              }`}
             />
+            {isEnhanced && (
+              <div className="absolute bottom-2 left-2 px-2 py-0.5 rounded-md bg-black/75 backdrop-blur-sm text-emerald-400 text-[10px] font-semibold flex items-center gap-1 border border-emerald-500/30 pointer-events-none">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>Clarity Boosted &amp; De-blurred</span>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center justify-between pt-1 text-xs">
