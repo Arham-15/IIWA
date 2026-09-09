@@ -282,12 +282,89 @@ def process_image_for_vision(image_bytes: bytes, filename: str = "", content_typ
         return f"data:image/jpeg;base64,{b64_image}"
 
 
+def safe_int(val) -> int:
+    if val is None:
+        return 0
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, str):
+        # Ignore percentage strings (e.g. '85%', '100.0%') so they don't corrupt class counts
+        if '%' in val:
+            return 0
+        m = re.search(r'\d+', val)
+        if m:
+            return int(m.group(0))
+    return 0
+
+
+def get_row_numbers(row: dict) -> tuple[int, int]:
+    """
+    Extracts conducted (held) and attended (present) counts from a row dictionary.
+    Excludes percentage columns, library weightage, credit hours, and serial numbers.
+    """
+    if not isinstance(row, dict):
+        return 0, 0
+
+    name = str(row.get("subject", row.get("name", row.get("course", "")))).lower()
+    if any(k in name for k in ["library", "weightage", "remedial", "non-academic", "lib -", "lib-"]):
+        return 0, 0
+
+    cleaned_items = {}
+    for k, v in row.items():
+        k_low = k.lower().strip()
+        # Strictly ignore percentage columns, absents, serials, codes, grades
+        if any(x in k_low for x in ["percent", "%", "pct", "absent", "grade", "credit", "sno", "sr", "code", "subject", "name", "course"]):
+            continue
+        cleaned_items[k_low] = v
+
+    att = 0
+    tot = 0
+
+    # 1. Match attended/present
+    for k_low, v in cleaned_items.items():
+        val = safe_int(v)
+        if val <= 0:
+            continue
+        if any(x in k_low for x in ["present", "attended", "classes_attended", "att_classes", "cleared", "total_attended"]):
+            att = val
+            break
+
+    # 2. Match conducted/held/total
+    for k_low, v in cleaned_items.items():
+        val = safe_int(v)
+        if val <= 0:
+            continue
+        if any(x in k_low for x in ["conduct", "held", "total_classes", "classes_held", "total_conducted", "delivered", "max", "scheduled"]):
+            tot = val
+            break
+
+    # 3. Fallbacks
+    if tot == 0:
+        for k_low, v in cleaned_items.items():
+            if k_low == "total" or "total" in k_low:
+                val = safe_int(v)
+                if val > 0:
+                    tot = val
+                    break
+
+    if att == 0:
+        for k_low, v in cleaned_items.items():
+            if k_low in ["att", "p"]:
+                val = safe_int(v)
+                if val > 0:
+                    att = val
+                    break
+
+    return tot, att
+
+
 def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
     """
     Deterministic attendance number extractor:
     1. Parses JSON objects or arrays of subjects.
     2. Excludes non-regular weightage rows (e.g. library attendance, remedial).
-    3. Performs pure Python mathematical summation across valid academic course rows.
+    3. Excludes percentage columns to prevent corrupted attendance calculations.
+    4. Performs pure Python mathematical summation across valid academic course rows.
     """
     if not raw_text:
         return 0, 0
@@ -300,20 +377,16 @@ def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
     if json_match:
         try:
             parsed = json.loads(json_match.group(0))
-            
-            def is_excluded_row(s_dict):
-                name = str(s_dict.get("subject", s_dict.get("name", s_dict.get("course", "")))).lower()
-                excluded_keywords = ["library", "weightage", "remedial", "non-academic", "lib -", "lib-"]
-                return any(k in name for k in excluded_keywords)
 
             # Case A: Dictionary containing a "subjects" list or top-level totals
             if isinstance(parsed, dict):
                 if "subjects" in parsed and isinstance(parsed["subjects"], list) and len(parsed["subjects"]) > 0:
-                    valid_subjects = [s for s in parsed["subjects"] if isinstance(s, dict) and not is_excluded_row(s)]
-                    if not valid_subjects:
-                        valid_subjects = [s for s in parsed["subjects"] if isinstance(s, dict)]
-                    tot_sum = sum(int(s.get("conducted", s.get("total", s.get("held", s.get("total_classes", 0))))) for s in valid_subjects)
-                    att_sum = sum(int(s.get("attended", s.get("present", s.get("attended_classes", 0)))) for s in valid_subjects)
+                    tot_sum = 0
+                    att_sum = 0
+                    for s in parsed["subjects"]:
+                        t, a = get_row_numbers(s)
+                        tot_sum += t
+                        att_sum += a
                     if tot_sum > 0:
                         return tot_sum, att_sum
 
@@ -321,32 +394,37 @@ def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
                 otot = None
                 oatt = None
                 for k in ["overall_total", "grand_total", "total_classes", "overall_conducted", "total", "held", "conducted"]:
-                    if k in parsed and isinstance(parsed[k], (int, float)) and parsed[k] > 0:
-                        otot = int(parsed[k])
-                        break
+                    if k in parsed:
+                        val = safe_int(parsed[k])
+                        if val > 0:
+                            otot = val
+                            break
                 for k in ["overall_attended", "grand_attended", "attended_classes", "overall_present", "attended", "present"]:
-                    if k in parsed and isinstance(parsed[k], (int, float)):
-                        oatt = int(parsed[k])
-                        break
+                    if k in parsed:
+                        val = safe_int(parsed[k])
+                        if val >= 0:
+                            oatt = val
+                            break
 
                 if otot is not None and oatt is not None and otot > 0:
                     return otot, oatt
 
             # Case B: Direct Array of subjects
             elif isinstance(parsed, list):
-                valid_subjects = [s for s in parsed if isinstance(s, dict) and not is_excluded_row(s)]
-                if not valid_subjects:
-                    valid_subjects = [s for s in parsed if isinstance(s, dict)]
-                tot_sum = sum(int(s.get("conducted", s.get("total", s.get("held", s.get("total_classes", 0))))) for s in valid_subjects)
-                att_sum = sum(int(s.get("attended", s.get("present", s.get("attended_classes", 0)))) for s in valid_subjects)
+                tot_sum = 0
+                att_sum = 0
+                for s in parsed:
+                    t, a = get_row_numbers(s)
+                    tot_sum += t
+                    att_sum += a
                 if tot_sum > 0:
                     return tot_sum, att_sum
         except Exception:
             pass
 
     # 2. Key-Value Regex Matching
-    tot_pattern = r"(?:total|held|conducted|delivered|max|classes_held|total_classes)(?:[^\d\n\r]{1,25})(\d+)"
-    att_pattern = r"(?:attend(?:ed)?|present|cleared|classes_attended|attended_classes)(?:[^\d\n\r]{1,25})(\d+)"
+    tot_pattern = r"(?:total|held|conducted|delivered|max|classes_held|total_classes)(?:[^\d\n\r%]{1,25})(\d+)"
+    att_pattern = r"(?:attend(?:ed)?|present|cleared|classes_attended|attended_classes)(?:[^\d\n\r%]{1,25})(\d+)"
     
     tot_matches = [int(x) for x in re.findall(tot_pattern, cleaned, re.IGNORECASE)]
     att_matches = [int(x) for x in re.findall(att_pattern, cleaned, re.IGNORECASE)]
@@ -368,6 +446,48 @@ def extract_attendance_numbers(raw_text: str) -> tuple[int, int]:
             return tot_total, att_total
 
     return 0, 0
+
+
+async def query_gemini_vision(data_url: str, prompt: str, api_key: str) -> Optional[str]:
+    """Direct HTTP client for Google Gemini Vision (gemini-2.5-flash / gemini-1.5-flash)"""
+    try:
+        parts = data_url.split(",", 1)
+        if len(parts) != 2:
+            return None
+        b64_data = parts[1]
+        mime_type = "image/jpeg"
+        if "image/png" in parts[0]:
+            mime_type = "image/png"
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inlineData": {
+                                "mimeType": mime_type,
+                                "data": b64_data,
+                            }
+                        },
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "temperature": 0.0,
+            },
+        }
+        import httpx
+        async with httpx.AsyncClient(timeout=25.0) as http_client:
+            resp = await http_client.post(url, json=payload)
+            if resp.status_code == 200:
+                result_json = resp.json()
+                return result_json["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        print("Gemini Vision API error:", e)
+    return None
 
 
 # ---------- Endpoints ----------
@@ -405,16 +525,24 @@ async def calculate_ai(request: Request, file: UploadFile = File(...)):
 
     system_instruction = (
         "You are an expert OCR attendance parser. Analyze this attendance portal screenshot.\n"
-        "Extract academic course rows as JSON:\n"
+        "Extract each academic course row as JSON:\n"
         "{\"subjects\": [{\"subject\": str, \"conducted\": <int>, \"attended\": <int>}, ...]}\n"
-        "CRITICAL: Exclude non-academic rows like 'Library Attendance', 'Weightage', or 'Remedial'."
+        "CRITICAL RULES:\n"
+        "1. Do NOT confuse the percentage column with the attended classes count.\n"
+        "2. Exclude non-academic rows like 'Library Attendance', 'Weightage', or 'Remedial'."
     )
 
     raw_text = ""
     last_error = None
 
-    # Try Groq models with exponential backoff
-    if active_groq:
+    # Option 1: Try Gemini Vision if GEMINI_API_KEY is configured
+    if gemini_key:
+        gemini_result = await query_gemini_vision(data_url, system_instruction, gemini_key)
+        if gemini_result:
+            raw_text = gemini_result
+
+    # Option 2: Try Groq Vision with auto-retries and model rotation
+    if not raw_text and active_groq:
         models_to_try = [GROQ_VISION_MODEL]
         if "qwen/qwen3.8-27b" not in models_to_try:
             models_to_try.append("qwen/qwen3.8-27b")
